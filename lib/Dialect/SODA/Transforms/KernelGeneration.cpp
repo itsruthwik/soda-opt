@@ -48,7 +48,7 @@ void SodaKernelGenerationPass::runOnOperation() {
 
   // Steps:
   // 1 Transfer SODAModuleOp region to its parent mlir::ModuleOp
-  // 2 Delete any code unrelated to the kernel
+  // 2 Delete any code unrelated to the kernel (if includeHost is false)
   // 3 Walk through the module and change soda.module terminator
   // 4 Walk through the module and change soda.func to regular func
   // 5 Walk through the module and change soda.return
@@ -66,31 +66,78 @@ void SodaKernelGenerationPass::runOnOperation() {
     return signalPassFailure();
   }
 
-  // Will be set to true if the current module has a SODAModuleOp
-  bool modified = false;
-  mop.walk([this, &modified, &mop](soda::SODAModuleOp sodaOp) {
-    if (modified) {
-      sodaOp.emitError("should only contain one 'soda::SODAModuleOp' op");
-      return signalPassFailure();
-    }
+  OpBuilder builder(mop.getContext());
 
-    IRMapping map;
-    sodaOp.getRegion().cloneInto(&(mop.getRegion()), map);
-    sodaOp.erase();
-
-    modified = true;
+  // Collect all SODAModuleOps first to avoid iterator invalidation during erase
+  SmallVector<soda::SODAModuleOp, 4> sodaModules;
+  mop.walk([&](soda::SODAModuleOp sodaOp) {
+    sodaModules.push_back(sodaOp);
   });
 
-  // This module does not have a SODAModuleOp
-  if (!modified) {
+  if (sodaModules.empty()) {
     return signalPassFailure();
   }
 
-  // We inserted a new block into a ModuleOp, ModuleOp should have only one
-  // block, thus delete the old (first) block. This also takes care of deleting
-  // the nested SODAModuleOp or other unrelated code.
-  Block *oldBlock = &mop->getRegions().front().getBlocks().front();
-  oldBlock->erase();
+  bool modified = true;
+  Block &mainBlock = mop.getRegion().front();
+  for (auto sodaOp : sodaModules) {
+
+    // Rename all symbols in the SODAModuleOp to avoid collisions at top level
+    SymbolTable symbolTable(sodaOp);
+    for (auto &op :
+         llvm::make_early_inc_range(sodaOp.getRegion().front().getOperations())) {
+      if (isa<soda::ModuleEndOp>(op))
+        continue;
+
+      if (auto symbol = dyn_cast<SymbolOpInterface>(op)) {
+        std::string newNameStr =
+            (Twine(sodaOp.getName()) + "_" + Twine(symbol.getName())).str();
+        StringAttr newName = builder.getStringAttr(newNameStr);
+
+        if (failed(SymbolTable::replaceAllSymbolUses(symbol, newName, sodaOp))) {
+          return signalPassFailure();
+        }
+        symbol.setName(newName);
+      }
+    }
+
+    Region &sodaRegion = sodaOp.getRegion();
+    for (auto &op :
+         llvm::make_early_inc_range(sodaRegion.front().getOperations())) {
+      if (isa<soda::ModuleEndOp>(op))
+        continue;
+      // Move kernel function to the top-level module
+      op.moveBefore(&mainBlock, mainBlock.end());
+    }
+    sodaOp.erase();
+  }
+
+  // If includeHost is true, we must convert soda.launch_func to func.call
+  if (this->includeHost) {
+    mop.walk([&](soda::LaunchFuncOp launchOp) {
+      std::string newName = (Twine(launchOp.getKernelModuleName()) + "_" +
+                             Twine(launchOp.getKernelName()))
+                                .str();
+      OpBuilder builder(launchOp);
+      builder.create<func::CallOp>(launchOp.getLoc(), newName, TypeRange{},
+                                   launchOp.getKernelOperands());
+      launchOp.erase();
+    });
+  }
+
+  // If includeHost is false, we delete everything that was in the original module
+  // except the newly moved kernels.
+  if (!this->includeHost) {
+    // Move kernels to a temporary place or just delete everything else
+    // Actually, the previous loop already moved them to the end of mainBlock.
+    // We want to delete the operations that were there *before* our kernels.
+    
+    // Let's re-think: the kernels are at the end. 
+    // We can delete ops from the beginning until we hit a SODAFuncOp.
+    while (!mainBlock.empty() && !isa<soda::SODAFuncOp>(mainBlock.front())) {
+      mainBlock.front().erase();
+    }
+  }
 
   mop.walk([](soda::ModuleEndOp endOp) { endOp.erase(); });
 

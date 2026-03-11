@@ -25,6 +25,8 @@ def SodaKernelGeneration : Pass<"soda-generate-bambu-accelcode", "mlir::ModuleOp
   let options = [
     Option<"noAliasAnalysis", "no-aa", "bool", /*default=*/"false",
            "If set, kernel arguments will not be marked with no-alias (default: false)">,
+    Option<"includeHost", "include-host", "bool", /*default=*/"false",
+           "If set, the original host code will be preserved (default: false)">,
   ];
 }
 

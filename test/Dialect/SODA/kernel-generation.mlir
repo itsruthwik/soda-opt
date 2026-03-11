@@ -1,5 +1,6 @@
 // RUN: soda-opt -split-input-file -allow-unregistered-dialect -soda-outline-bambu-code -soda-generate-bambu-accelcode %s | FileCheck %s
 // RUN: soda-opt -split-input-file -allow-unregistered-dialect -soda-outline-bambu-code -soda-generate-bambu-accelcode=no-aa %s | FileCheck %s --check-prefixes CHECKNOAA
+// RUN: soda-opt -split-input-file -allow-unregistered-dialect -soda-outline-bambu-code -soda-generate-bambu-accelcode="include-host=true" %s | FileCheck %s --check-prefixes CHECKHOST
 
 // CHECK: module attributes {soda.bambu.container_module
 func.func @driver() {
@@ -10,7 +11,7 @@ func.func @driver() {
   // CHECK-NOT: "allocateC"
   %C = "allocateC"() : () -> (memref<512x512xf32>)
 
-  // CHECK-NOT: "soda.func"
+  // CHECK: func.func @driver_kernel_driver_kernel
   soda.launch  {
     linalg.matmul ins(%A, %B : memref<512x512xf32>, memref<512x512xf32>)
                     outs(%C : memref<512x512xf32>)
@@ -29,7 +30,8 @@ func.func @complex() {
   %B = func.call @init_b(): () -> (memref<512x512xf32>)
 
   soda.launch  {
-    // CHECK: call @init_c
+    // CHECK: func.func @complex_kernel_complex_kernel
+    // CHECK: call @complex_kernel_init_c
     %C = func.call @init_c(): () -> (memref<512x512xf32>)
     linalg.matmul ins(%A, %B : memref<512x512xf32>, memref<512x512xf32>)
                     outs(%C : memref<512x512xf32>)
@@ -41,13 +43,13 @@ func.func @complex() {
 
 // CHECK-NOT: func.func private @init_b
 func.func private @init_b() -> (memref<512x512xf32>)
-// CHECK: func.func private @init_c
+// CHECK: func.func private @complex_kernel_init_c
 func.func private @init_c() -> (memref<512x512xf32>)
 
 // -----
 
-// CHECKNOAA: func.func @gemm_4_kernel(%arg0: memref<4x4xf32>, %arg1: f32, %arg2: memref<4x4xf32>, %arg3: memref<4x4xf32>, %arg4: f32) {
-// CHECK: func.func @gemm_4_kernel(%arg0: memref<4x4xf32> {llvm.noalias}, %arg1: f32, %arg2: memref<4x4xf32> {llvm.noalias}, %arg3: memref<4x4xf32> {llvm.noalias}, %arg4: f32) {
+// CHECKNOAA: func.func @gemm_4_kernel_gemm_4_kernel(%arg0: memref<4x4xf32>, %arg1: f32, %arg2: memref<4x4xf32>, %arg3: memref<4x4xf32>, %arg4: f32) {
+// CHECK: func.func @gemm_4_kernel_gemm_4_kernel(%arg0: memref<4x4xf32> {llvm.noalias}, %arg1: f32, %arg2: memref<4x4xf32> {llvm.noalias}, %arg3: memref<4x4xf32> {llvm.noalias}, %arg4: f32) {
 func.func @gemm_4(%arg0: f32, %arg1: f32, %arg2: memref<4x4xf32>, %arg3: memref<4x4xf32>, %arg4: memref<4x4xf32>) {
   soda.launch {                                                                                                                            
     affine.for %arg5 = 0 to 4 {                                                                                 
@@ -69,4 +71,35 @@ func.func @gemm_4(%arg0: f32, %arg1: f32, %arg2: memref<4x4xf32>, %arg3: memref<
     soda.terminator                             
   }                                                                                                                                                                           
   return                                                                                                                                                                                          
-}  
+}
+
+// -----
+
+// CHECK: module attributes {soda.bambu.container_module
+// CHECK: func.func @multi_matmul_kernel_multi_matmul_kernel
+// CHECK: func.func @multi_matmul_kernel_0_multi_matmul_kernel
+func.func @multi_matmul(%arg0: memref<16x16xf32>, %arg1: memref<16x16xf32>, %arg2: memref<16x16xf32>) {
+  soda.launch {
+    linalg.matmul ins(%arg0, %arg1 : memref<16x16xf32>, memref<16x16xf32>) outs(%arg2 : memref<16x16xf32>)
+    soda.terminator
+  }
+  soda.launch {
+    linalg.matmul ins(%arg1, %arg0 : memref<16x16xf32>, memref<16x16xf32>) outs(%arg2 : memref<16x16xf32>)
+    soda.terminator
+  }
+  return
+}
+
+// -----
+
+// CHECKHOST: module attributes {soda.bambu.container_module
+// CHECKHOST: func.func @host_and_kernel
+// CHECKHOST: call @host_and_kernel_kernel_host_and_kernel
+// CHECKHOST: func.func @host_and_kernel_kernel_host_and_kernel
+func.func @host_and_kernel(%arg0: memref<16x16xf32>, %arg1: memref<16x16xf32>, %arg2: memref<16x16xf32>) {
+  soda.launch {
+    linalg.matmul ins(%arg0, %arg1 : memref<16x16xf32>, memref<16x16xf32>) outs(%arg2 : memref<16x16xf32>)
+    soda.terminator
+  }
+  return
+}
